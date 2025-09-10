@@ -2,9 +2,11 @@
 require('dotenv').config();
 const express = require('express');
 const pool = require('./database'); // <--- new
-
+const { hash } = require('bcryptjs');
+const bcrypt = require('bcryptjs'); // ← Fix this
+const jwt = require('jsonwebtoken'); // ← Add this
 const app = express();
-
+app.use(express.json());
 
 // Request Logger Middleware - Shows every request coming in
 app.use((req, res, next) => {
@@ -26,6 +28,128 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   console.log(`🔗 Database connection ready for ${req.url}`);
   next();
+});
+
+
+//.................................Registre User ............ 
+app.post('/auth/register', async (req, res) => {
+  console.log(`Adding a new user!`);
+  
+  try {
+    // 1. Get data from request body
+    const { name, email, password } = req.body;
+    
+    // 2. Basic validation
+    if (!name || !email || !password) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: "Name, email, and password are required" 
+      });
+    }
+    
+    // 3. 🔥 HASH THE PASSWORD - This is crucial!
+    const saltRounds = 12;
+    const password_hash = await bcrypt.hash(password, saltRounds);
+    
+    // 4. Insert into database with hashed password
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password_hash) 
+       VALUES ($1, $2, $3) 
+       RETURNING id, name, email`, // Don't return password!
+      [name, email, password_hash]
+    );
+    
+    console.log(`Added user! ${result.rows.length} user created`);
+    
+    // 5. Return success (without password hash!)
+    res.json({ 
+      ok: true, 
+      message: "User created successfully",
+      user: result.rows[0] 
+    });
+    
+  } catch (err) {
+    console.error(`❌ Database error:`, err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+//.....................................................Login User...................................
+
+app.post('/auth/login', async (req, res) => {
+
+  console.log(`User login attempt...`);
+  
+  try {
+    const { email, password } = req.body;
+    const result = await pool.query(`
+      SELECT id, name, email, password_hash 
+      FROM users 
+      WHERE email = $1`, [email]);
+    if (result.rows.length === 0) {
+      return res.status(401).json({ ok: false, error: "Invalid email or password" });
+    }
+    const user = result.rows[0];
+    const passwordMatch = await bcrypt.compare(password, user.password_hash); 
+    if (!passwordMatch) {
+      return res.status(401).json({ ok: false, error: "Invalid email or password" });
+    }
+          // 🎯 ADD JWT GENERATION HERE:
+      const token = jwt.sign(
+        { 
+          userId: user.id, 
+          email: user.email 
+        }, 
+        process.env.JWT_SECRET || 'your-secret-key', 
+        { expiresIn: '7d' }
+      );
+    res.json({ ok: true, message: "Login successful", user: { 
+    id: user.id,
+    name: user.name, 
+    email: user.email}, 
+    token: token
+    });
+
+
+  } catch (err) {
+    console.error(`❌ Login error:`, err.message);
+    res.status(500).json({ ok: false, error: err.message });
+  }
+
+});
+  
+//.................................. Auth Middleware ...............................
+const authenticateToken = (req, res, next) => {
+  try {
+    console.log('🔍 All headers:', req.headers); // ← Add this debug line
+    
+    const authHeader = req.headers.authorization;
+    console.log('🔍 Auth header:', authHeader); // ← Add this debug line
+    
+    const token = authHeader && authHeader.split(' ')[1];
+    console.log('🔍 Extracted token:', token); // ← Add this debug line
+    
+    if (!token) {
+      return res.status(401).json({ error: "Access denied. No token provided." });
+    }
+    
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    
+    req.user = decoded;
+    next();
+    
+  } catch (error) {
+    console.log('🔍 JWT Error:', error.message); // ← Add this debug line
+    res.status(403).json({ error: "Invalid token" });
+  }
+};
+
+// Protected route example:
+app.get('/auth/me', authenticateToken, (req, res) => {
+  // Only runs if token is valid!
+  res.json({ 
+    ok: true, 
+    user: req.user // ← This comes from the middleware!
+  });
 });
 
 
